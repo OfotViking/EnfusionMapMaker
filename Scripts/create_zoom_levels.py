@@ -73,17 +73,35 @@ class MapTileContainer():
         lod_tiles: dict[int, list[MapTile]] = {}
         for file in matching_files:
             # Files are in the structure {zoom_level}/{x}/{z}/tile.jpg
-            path_elements = file.split("/")
-            lod_level = int(path_elements[-4])
-            x = int(path_elements[-3])
-            z = int(path_elements[-2])
-            tile = MapTile(x, z, lod_level, directory)
-            print(f"Found tile {tile}")
-            if lod_level not in lod_tiles:
-                lod_tiles[lod_level] = []
-            lod_tiles[lod_level].append(tile)
+            # Use os.path.split for robust path parsing regardless of separator
+            try:
+                head, _ = os.path.split(file)    # D:/.../LODS/0/0/0
+                head, z_str = os.path.split(head)    # D:/.../LODS/0/0, z='0'
+                head, x_str = os.path.split(head)    # D:/.../LODS/0, x='0'
+                head, lod_str = os.path.split(head)  # D:/.../LODS, lod='0'
+                
+                lod_level = int(lod_str)
+                x = int(x_str)
+                z = int(z_str)
+                
+                # Ensure the path structure matches expectations relative to the base directory
+                expected_base = os.path.normpath(directory)
+                actual_base = os.path.normpath(head)
+                if actual_base != expected_base:
+                    print(f"Warning: Skipping file with unexpected base path: {file}. Expected base: {expected_base}, Actual base: {actual_base}")
+                    continue
+
+                tile = MapTile(x, z, lod_level, directory)
+                print(f"Found tile {tile}")
+                if lod_level not in lod_tiles:
+                    lod_tiles[lod_level] = []
+                lod_tiles[lod_level].append(tile)
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Could not parse path structure for file: {file}. Error: {e}")
+                continue # Skip files that don't match the expected structure
+
         if len(lod_tiles) == 0:
-            raise Exception("No LOD tiles found")
+            raise Exception("No valid LOD tiles found matching the expected structure.")
         return cls(lod_tiles, directory)
     
     def __init__(self, tile_dict: dict[int, list[MapTile]], basedir: str, background_color: str = "#1f333d"):
