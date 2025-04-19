@@ -6,6 +6,9 @@ import glob
 from PIL import Image, ImageOps, ImageFilter
 import numpy as np
 from scipy import fftpack
+import tkinter as tk
+from tkinter import ttk, Canvas, Scale, IntVar, StringVar
+from PIL import ImageTk
 
 # Configuration - Make sure this matches the Enfusion Workbench tool settings
 TILE_CROP_SIZE = 550 # pixels - Set this initially to be too large for perfect tiling
@@ -106,6 +109,482 @@ class Screenshot():
     
     def get_unit_coordinates(self, min_x: int, min_z: int, filename_coordinate_step: int):
         return (int((self.xCoordWS - min_x) / filename_coordinate_step), int((self.zCoordWS - min_z) / filename_coordinate_step))
+
+
+class TileAlignmentGUI:
+    """GUI for aligning screenshot tiles and finding the optimal overlap value."""
+    
+    def __init__(self, root, processor):
+        self.root = root
+        self.processor = processor
+        self.root.title("Tile Alignment Tool")
+        
+        # Find adjacent tiles to work with
+        self.selected_tile_index = 0
+        self.tiles = self.processor.screenshots
+        if len(self.tiles) < 2:
+            raise RuntimeError("Need at least 2 screenshots to align")
+            
+        # Find all valid tile sets (tiles with neighbors)
+        self.valid_tile_sets = self.find_valid_tile_sets()
+        if not self.valid_tile_sets:
+            raise RuntimeError("Could not find any adjacent tiles to align")
+        
+        # Current set index
+        self.current_set_index = 0
+        self.load_current_tile_set()
+            
+        # Initialize variables
+        self.overlap_var = IntVar(value=abs(TILE_OVERLAP))
+        self.crop_size_var = IntVar(value=TILE_CROP_SIZE)
+        self.direction_var = StringVar(value="Horizontal" if self.horizontal_neighbor else "Vertical")
+        
+        # Keep track of original values for reset functionality
+        self.original_overlap = TILE_OVERLAP
+        self.original_crop_size = TILE_CROP_SIZE
+        
+        # Setup the UI
+        self.setup_ui()
+        
+        # Initial render
+        self.update_preview()
+    
+    def find_valid_tile_sets(self):
+        """Find all tiles that have at least one neighbor."""
+        valid_sets = []
+        
+        for tile in self.tiles:
+            h_neighbor = self.processor.find_neighbour(tile, self.processor.tile_step_size, 0)
+            v_neighbor = self.processor.find_neighbour(tile, 0, self.processor.tile_step_size)
+            
+            # If this tile has at least one neighbor, it's a valid set
+            if h_neighbor or v_neighbor:
+                valid_sets.append({
+                    'tile': tile,
+                    'h_neighbor': h_neighbor,
+                    'v_neighbor': v_neighbor
+                })
+        
+        return valid_sets
+    
+    def load_current_tile_set(self):
+        """Load the current tile set based on the current_set_index."""
+        current_set = self.valid_tile_sets[self.current_set_index]
+        self.current_tile = current_set['tile']
+        self.horizontal_neighbor = current_set['h_neighbor']
+        self.vertical_neighbor = current_set['v_neighbor']
+        
+        # Update selected tile index for the dropdown selector
+        for i, tile in enumerate(self.tiles):
+            if tile == self.current_tile:
+                self.selected_tile_index = i
+                break
+    
+    def next_set(self):
+        """Move to the next valid tile set."""
+        if len(self.valid_tile_sets) > 1:
+            self.current_set_index = (self.current_set_index + 1) % len(self.valid_tile_sets)
+            self.load_current_tile_set()
+            self.update_ui_for_new_set()
+            self.update_preview()
+            self.info_var.set(self.get_info_text())
+    
+    def prev_set(self):
+        """Move to the previous valid tile set."""
+        if len(self.valid_tile_sets) > 1:
+            self.current_set_index = (self.current_set_index - 1) % len(self.valid_tile_sets)
+            self.load_current_tile_set()
+            self.update_ui_for_new_set()
+            self.update_preview()
+            self.info_var.set(self.get_info_text())
+    
+    def update_ui_for_new_set(self):
+        """Update UI elements when switching to a new tile set."""
+        # Update the tile selector dropdown
+        self.tile_selector.current(self.selected_tile_index)
+        
+        # Update direction dropdown values
+        direction_options = ["Horizontal", "Vertical"] if self.horizontal_neighbor and self.vertical_neighbor else \
+                          ["Horizontal"] if self.horizontal_neighbor else ["Vertical"]
+        
+        self.direction_dropdown['values'] = direction_options
+        
+        # Check if current direction is valid for new set
+        current_direction = self.direction_var.get()
+        if current_direction == "Horizontal" and not self.horizontal_neighbor:
+            self.direction_var.set("Vertical")
+        elif current_direction == "Vertical" and not self.vertical_neighbor:
+            self.direction_var.set("Horizontal")
+    
+    def setup_ui(self):
+        # Main frame
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Preview canvas
+        self.canvas = Canvas(main_frame, width=1200, height=600, bg="black")
+        self.canvas.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Navigation frame - add this above the controls
+        nav_frame = ttk.Frame(main_frame, padding="5")
+        nav_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        
+        # Navigation buttons
+        ttk.Button(nav_frame, text="← Previous Set", command=self.prev_set).grid(row=0, column=0, padx=(0, 10))
+        
+        # Add set indicator label
+        self.set_indicator = StringVar(value=f"Set {self.current_set_index + 1} of {len(self.valid_tile_sets)}")
+        ttk.Label(nav_frame, textvariable=self.set_indicator, width=20, anchor="center").grid(row=0, column=1)
+        
+        ttk.Button(nav_frame, text="Next Set →", command=self.next_set).grid(row=0, column=2, padx=(10, 0))
+        
+        # Configure navigation frame columns
+        nav_frame.columnconfigure(0, weight=1)
+        nav_frame.columnconfigure(1, weight=2)
+        nav_frame.columnconfigure(2, weight=1)
+        
+        # Controls frame
+        controls_frame = ttk.Frame(main_frame, padding="5")
+        controls_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        
+        # Overlap slider 
+        ttk.Label(controls_frame, text="Overlap:").grid(row=0, column=0, sticky=tk.W)
+        overlap_slider = Scale(controls_frame, from_=0, to=200, orient=tk.HORIZONTAL, 
+                              variable=self.overlap_var, command=self.on_overlap_change,
+                              length=300)
+        overlap_slider.grid(row=0, column=1, sticky=(tk.W, tk.E))
+        
+        # Add numeric entry field for precise overlap value
+        ttk.Label(controls_frame, text="Value:").grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
+        self.overlap_entry = ttk.Entry(controls_frame, width=5, justify='right')
+        self.overlap_entry.insert(0, str(self.overlap_var.get()))
+        self.overlap_entry.grid(row=0, column=3, sticky=tk.W, padx=(2, 10))
+        self.overlap_entry.bind("<Return>", self.on_overlap_entry_change)
+        
+        # Add crop size slider (new control)
+        ttk.Label(controls_frame, text="Crop Size:").grid(row=1, column=0, sticky=tk.W)
+        crop_size_slider = Scale(controls_frame, from_=300, to=1500, orient=tk.HORIZONTAL,
+                               variable=self.crop_size_var, command=self.on_crop_size_change,
+                               length=300)
+        crop_size_slider.grid(row=1, column=1, sticky=(tk.W, tk.E))
+        
+        # Add numeric entry field for precise crop size value
+        ttk.Label(controls_frame, text="Value:").grid(row=1, column=2, sticky=tk.W, padx=(5, 0))
+        self.crop_size_entry = ttk.Entry(controls_frame, width=5, justify='right')
+        self.crop_size_entry.insert(0, str(self.crop_size_var.get()))
+        self.crop_size_entry.grid(row=1, column=3, sticky=tk.W, padx=(2, 10))
+        self.crop_size_entry.bind("<Return>", self.on_crop_size_entry_change)
+        
+        # Direction selector
+        ttk.Label(controls_frame, text="Direction:").grid(row=0, column=4, sticky=tk.W, padx=(20, 0))
+        direction_options = ["Horizontal", "Vertical"] if self.horizontal_neighbor and self.vertical_neighbor else \
+                            ["Horizontal"] if self.horizontal_neighbor else ["Vertical"]
+        
+        self.direction_dropdown = ttk.Combobox(controls_frame, textvariable=self.direction_var, 
+                                        values=direction_options, state="readonly", width=10)
+        self.direction_dropdown.grid(row=0, column=5, sticky=tk.W)
+        self.direction_dropdown.bind("<<ComboboxSelected>>", self.on_direction_change)
+        
+        # Tile selector
+        ttk.Label(controls_frame, text="Tile:").grid(row=1, column=4, sticky=tk.W, padx=(20, 0))
+        self.tile_selector = ttk.Combobox(controls_frame, 
+                                     values=[f"{t.xCoordWS}x{t.zCoordWS}" for t in self.tiles], 
+                                     state="readonly", width=15)
+        self.tile_selector.current(self.selected_tile_index)
+        self.tile_selector.grid(row=1, column=5, sticky=tk.W)
+        self.tile_selector.bind("<<ComboboxSelected>>", self.on_tile_change)
+        
+        # Button frame
+        button_frame = ttk.Frame(main_frame, padding="5")
+        button_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        
+        # Apply button
+        ttk.Button(button_frame, text="Apply Settings", command=self.apply_settings).grid(row=0, column=0, padx=(0, 10))
+        
+        # Generate Tiles button
+        ttk.Button(button_frame, text="Generate Tiles", command=self.generate_tiles).grid(row=0, column=1, padx=(10, 0))
+        
+        # Reset button
+        ttk.Button(button_frame, text="Reset to Original", command=self.reset_to_original).grid(row=0, column=2, padx=(10, 0))
+        
+        # Configure button frame columns
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+        button_frame.columnconfigure(2, weight=1)
+        
+        # Info label
+        self.info_var = StringVar(value=self.get_info_text())
+        info_label = ttk.Label(main_frame, textvariable=self.info_var)
+        info_label.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        controls_frame.columnconfigure(1, weight=1)
+        
+    def get_neighbor_for_current_direction(self):
+        if self.direction_var.get() == "Horizontal":
+            return self.horizontal_neighbor
+        else:
+            return self.vertical_neighbor
+            
+    def get_info_text(self):
+        overlap = self.overlap_var.get()
+        crop_size = self.crop_size_var.get()
+        direction = self.direction_var.get()
+        neighbor = self.get_neighbor_for_current_direction()
+        
+        # Update set indicator
+        self.set_indicator.set(f"Set {self.current_set_index + 1} of {len(self.valid_tile_sets)}")
+        
+        return (f"Current tile: {self.current_tile.xCoordWS}x{self.current_tile.zCoordWS}, "
+                f"{direction} neighbor: {neighbor.xCoordWS}x{neighbor.zCoordWS}, "
+                f"Overlap: {overlap} pixels, Crop Size: {crop_size} pixels")
+        
+    def on_overlap_change(self, *args):
+        # Update the entry field to match the slider
+        self.overlap_entry.delete(0, tk.END)
+        self.overlap_entry.insert(0, str(self.overlap_var.get()))
+        
+        self.update_preview()
+        self.info_var.set(self.get_info_text())
+        
+    def on_overlap_entry_change(self, event):
+        try:
+            new_value = int(self.overlap_entry.get())
+            # Ensure the value is within the slider range
+            if new_value < 0:
+                new_value = 0
+            elif new_value > 200:
+                new_value = 200
+                
+            self.overlap_var.set(new_value)
+            self.update_preview()
+            self.info_var.set(self.get_info_text())
+        except ValueError:
+            self.info_var.set("Invalid overlap value. Please enter a number.")
+            # Reset entry to current slider value
+            self.overlap_entry.delete(0, tk.END)
+            self.overlap_entry.insert(0, str(self.overlap_var.get()))
+    
+    def on_crop_size_change(self, *args):
+        # Update the entry field to match the slider
+        self.crop_size_entry.delete(0, tk.END)
+        self.crop_size_entry.insert(0, str(self.crop_size_var.get()))
+        
+        self.update_preview()
+        self.info_var.set(self.get_info_text())
+        
+    def on_crop_size_entry_change(self, event):
+        try:
+            new_value = int(self.crop_size_entry.get())
+            # Ensure the value is within a reasonable range
+            if new_value < 300:
+                new_value = 300
+            elif new_value > 1500:
+                new_value = 1500
+                
+            self.crop_size_var.set(new_value)
+            self.update_preview()
+            self.info_var.set(self.get_info_text())
+        except ValueError:
+            self.info_var.set("Invalid crop size value. Please enter a number.")
+            # Reset entry to current slider value
+            self.crop_size_entry.delete(0, tk.END)
+            self.crop_size_entry.insert(0, str(self.crop_size_var.get()))
+        
+    def on_direction_change(self, *args):
+        self.update_preview()
+        self.info_var.set(self.get_info_text())
+        
+    def on_tile_change(self, *args):
+        idx = self.tile_selector.current()
+        self.selected_tile_index = idx
+        self.current_tile = self.tiles[idx]
+        
+        # Find neighbors for the new current tile
+        self.horizontal_neighbor = self.processor.find_neighbour(
+            self.current_tile, self.processor.tile_step_size, 0)
+        self.vertical_neighbor = self.processor.find_neighbour(
+            self.current_tile, 0, self.processor.tile_step_size)
+        
+        # Find matching set in valid_tile_sets
+        for i, tile_set in enumerate(self.valid_tile_sets):
+            if tile_set['tile'] == self.current_tile:
+                self.current_set_index = i
+                break
+        
+        # If the current direction is no longer valid, switch it
+        if self.direction_var.get() == "Horizontal" and not self.horizontal_neighbor:
+            if self.vertical_neighbor:
+                self.direction_var.set("Vertical")
+            else:
+                # No neighbors available, find a different tile
+                self.info_var.set("No neighbors available for this tile. Please select another.")
+                return
+        elif self.direction_var.get() == "Vertical" and not self.vertical_neighbor:
+            if self.horizontal_neighbor:
+                self.direction_var.set("Horizontal")
+            else:
+                # No neighbors available, find a different tile
+                self.info_var.set("No neighbors available for this tile. Please select another.")
+                return
+        
+        self.update_preview()
+        self.info_var.set(self.get_info_text())
+    
+    def get_image_for_tile(self, tile):
+        """Try to get either tile_image or screenshot_image, with appropriate fallback handling."""
+        try:
+            # First try to use the tile image if it exists
+            if os.path.exists(tile.tile_filepath):
+                return tile.tile_image.copy()
+            # Fall back to the screenshot image if tile doesn't exist
+            elif tile.screenshot_filepath and os.path.exists(tile.screenshot_filepath):
+                # If we're using screenshot images, we need to crop them to the active crop size
+                img = tile.screenshot_image.copy()
+                width, height = img.size
+                crop_size = self.crop_size_var.get()
+                left = (width - crop_size) / 2
+                top = (height - crop_size) / 2
+                right = (width + crop_size) / 2
+                bottom = (height + crop_size) / 2
+                return img.crop((left, top, right, bottom))
+            else:
+                raise RuntimeError(f"No image found for tile at {tile.xCoordWS}x{tile.zCoordWS}. "
+                                  f"Tried {tile.tile_filepath} and {tile.screenshot_filepath}")
+        except Exception as e:
+            print(f"Error loading image for {tile.xCoordWS}x{tile.zCoordWS}: {e}")
+            # Create a blank image as a last resort
+            return Image.new("RGB", (self.crop_size_var.get(), self.crop_size_var.get()), "gray")
+        
+    def update_preview(self):
+        self.canvas.delete("all")
+        
+        # Get the current settings
+        overlap = self.overlap_var.get()
+        crop_size = self.crop_size_var.get()
+        
+        try:
+            # Load current tile image
+            current_img = self.get_image_for_tile(self.current_tile)
+            img_size = current_img.size[0]  # Assuming square tiles
+            
+            neighbor = self.get_neighbor_for_current_direction()
+            if not neighbor:
+                self.canvas.create_text(
+                    600, 300, text="No neighbor available in this direction", fill="white", font=("Arial", 16))
+                return
+            
+            # Load neighbor tile image
+            neighbor_img = self.get_image_for_tile(neighbor)
+            
+            # Create a composite image based on the direction
+            if self.direction_var.get() == "Horizontal":
+                # Horizontal alignment (neighbor on the right)
+                composite_width = img_size * 2 - overlap
+                composite_height = img_size
+                composite = Image.new("RGB", (composite_width, composite_height))
+                composite.paste(current_img, (0, 0))
+                composite.paste(neighbor_img, (img_size - overlap, 0))
+            else:
+                # Vertical alignment (neighbor below)
+                composite_width = img_size
+                composite_height = img_size * 2 - overlap
+                composite = Image.new("RGB", (composite_width, composite_height))
+                composite.paste(current_img, (0, 0))
+                composite.paste(neighbor_img, (0, img_size - overlap))
+            
+            # Draw gridlines
+            self.draw_gridlines(composite, img_size, overlap)
+            
+            # Resize if needed to fit the canvas
+            canvas_width = 1200
+            canvas_height = 600
+            scale_factor = min(canvas_width / composite_width, canvas_height / composite_height)
+            
+            if scale_factor < 1:
+                new_size = (int(composite_width * scale_factor), int(composite_height * scale_factor))
+                composite = composite.resize(new_size, Image.LANCZOS)
+            
+            # Convert to PhotoImage and display
+            self.photo = ImageTk.PhotoImage(composite)
+            self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.photo)
+        except Exception as e:
+            self.canvas.create_text(
+                600, 300, text=f"Error creating preview: {str(e)}", fill="white", font=("Arial", 16))
+            import traceback
+            traceback.print_exc()
+    
+    def draw_gridlines(self, img, tile_size, overlap):
+        """Draw gridlines on the composite image to show tile boundaries."""
+        from PIL import ImageDraw  # Import here to avoid import errors if not using GUI
+        draw = ImageDraw.Draw(img)
+        
+        # Draw a rectangle around the first tile
+        draw.rectangle([0, 0, tile_size-1, tile_size-1], outline="yellow", width=2)
+        
+        # Draw a rectangle around the second tile
+        if self.direction_var.get() == "Horizontal":
+            draw.rectangle([tile_size-overlap, 0, 2*tile_size-overlap-1, tile_size-1], outline="cyan", width=2)
+            # Draw overlap area
+            draw.rectangle([tile_size-overlap, 0, tile_size-1, tile_size-1], outline="red", width=2)
+        else:
+            draw.rectangle([0, tile_size-overlap, tile_size-1, 2*tile_size-overlap-1], outline="cyan", width=2)
+            # Draw overlap area
+            draw.rectangle([0, tile_size-overlap, tile_size-1, tile_size-1], outline="red", width=2)
+    
+    def apply_settings(self):
+        """Apply the selected settings globally."""
+        new_overlap = -self.overlap_var.get()  # Negative for tile displacement
+        new_crop_size = self.crop_size_var.get()
+        
+        global TILE_OVERLAP, TILE_CROP_SIZE
+        TILE_OVERLAP = new_overlap
+        TILE_CROP_SIZE = new_crop_size
+        
+        # Show confirmation
+        print(f"Applied new settings: TILE_OVERLAP = {TILE_OVERLAP}, TILE_CROP_SIZE = {TILE_CROP_SIZE}")
+        self.info_var.set(f"Applied settings: TILE_OVERLAP = {TILE_OVERLAP}, TILE_CROP_SIZE = {TILE_CROP_SIZE}. " + 
+                        self.get_info_text())
+    
+    def reset_to_original(self):
+        """Reset to the original values."""
+        self.overlap_var.set(abs(self.original_overlap))
+        self.crop_size_var.set(self.original_crop_size)
+        
+        # Update entry fields
+        self.overlap_entry.delete(0, tk.END)
+        self.overlap_entry.insert(0, str(self.overlap_var.get()))
+        
+        self.crop_size_entry.delete(0, tk.END)
+        self.crop_size_entry.insert(0, str(self.crop_size_var.get()))
+        
+        self.update_preview()
+        self.info_var.set("Reset to original values. " + self.get_info_text())
+    
+    def generate_tiles(self):
+        """Generate tiles from screenshots for the selected tiles using current settings."""
+        try:
+            # Apply the current settings first
+            self.apply_settings()
+            
+            # Generate tiles for current tile and neighbor
+            self.current_tile.create_tile()
+            neighbor = self.get_neighbor_for_current_direction()
+            if neighbor:
+                neighbor.create_tile()
+            
+            # Update the preview with the newly generated tiles
+            self.update_preview()
+            self.info_var.set("Generated tiles successfully with current settings. " + self.get_info_text())
+        except Exception as e:
+            self.info_var.set(f"Error generating tiles: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
 
 class ScreenshotProcessor():
     screenshots: list[Screenshot]
@@ -584,6 +1063,16 @@ class ScreenshotProcessor():
         
         return Image.fromarray(visualization)
 
+    def launch_alignment_gui(self):
+        """Launch the tile alignment GUI tool."""
+        root = tk.Tk()
+        try:
+            from PIL import ImageDraw  # Import here to avoid import errors if not using GUI
+            gui = TileAlignmentGUI(root, self)
+            root.mainloop()
+        except Exception as e:
+            print(f"Error launching GUI: {e}")
+            root.destroy()
 
 
 if __name__ == "__main__":
@@ -593,6 +1082,7 @@ if __name__ == "__main__":
     parser.add_argument("output_dir", help="The directory containing the screenshots to crop")
     parser.add_argument("-f", "--find-crop", help="Automatically find the crop size", action="store_true")
     parser.add_argument("-m", "--make_map", help="Create a large map from the screenshots instead of the final tiles", action="store_true")
+    parser.add_argument("-g", "--gui", help="Launch the tile alignment GUI", action="store_true")
     args = parser.parse_args()
 
     print(f"Processing screenshots in {args.input_dir}")
@@ -603,11 +1093,16 @@ if __name__ == "__main__":
         screenshot_processor.auto_find_crop()
         sys.exit(0)
     
+    if args.gui:
+        print("Launching alignment GUI")
+        screenshot_processor.launch_alignment_gui()
+        sys.exit(0)
+    
     screenshot_processor.make_tiles() # Will also delete the original screenshots if DELETE_ORIGINALS is True
 
     if args.make_map:
         print("Making large test map")
-        screenshot_processor.make_large_map(os.path.join(args.output_dir, "test_map.jpeg"))
+        screenshot_processor.make_large_map(os.path.join(args.output_dir, "test_map.png"))
     else:
         print("Creating initial tiles")
         screenshot_processor.make_initial_tiles(args.output_dir, 0)
